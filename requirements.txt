@@ -1,3 +1,7 @@
 streamlit
 openai
 pandas
+python-docx
+pypdf
+pillow
+pytesseract
