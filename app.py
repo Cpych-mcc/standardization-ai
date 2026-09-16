@@ -1,7 +1,26 @@
 import streamlit as st
 import pandas as pd
 import os
-from openai import OpenAI  # 这里使用 OpenAI 格式的 SDK，兼容大多数国产大模型
+from openai import OpenAI
+import io
+
+# --- 引入处理不同文件的库 ---
+try:
+    import docx
+except ImportError:
+    docx = None
+
+try:
+    import pypdf
+except ImportError:
+    pypdf = None
+
+try:
+    from PIL import Image
+    import pytesseract
+except ImportError:
+    Image = None
+    pytesseract = None
 
 # --- 页面配置 ---
 st.set_page_config(page_title="标准化工作智能助手", layout="wide", page_icon="⚖️")
@@ -10,13 +29,13 @@ st.set_page_config(page_title="标准化工作智能助手", layout="wide", page
 with st.sidebar:
     st.header("⚙️ 系统配置")
     api_key = st.text_input("请输入大模型 API Key", type="password", help="请输入兼容 OpenAI 格式的 API Key")
-    base_url = st.text_input("API Base URL", value="https://api.deepseek.com") # 默认 DeepSeek，可改为通义千问等
+    base_url = st.text_input("API Base URL", value="https://api.deepseek.com")
     model_name = st.text_input("模型名称", value="deepseek-chat")
     
     st.markdown("---")
-    st.info("💡 **使用指南**：\n1. 左侧选择任务场景\n2. 填入原始材料\n3. 点击生成获取专业文档")
+    st.info("💡 **使用指南**：\n1. 左侧选择任务场景\n2. 上传文件或粘贴文本\n3. 点击生成获取专业文档")
 
-# --- 核心 Prompt 库 (直接提取自你的 Excel) ---
+# --- 核心 Prompt 库 ---
 PROMPT_TEMPLATES = {
     "国标草案研讨会会议纪要": """
 你是一名资深的标准化工程师助理，负责将会议原始材料精准转化为会议纪要。你的核心职责是“忠实整理”，而非“创作”。
@@ -95,6 +114,33 @@ PROMPT_TEMPLATES = {
 """
 }
 
+# --- 文件解析函数 ---
+def extract_text_from_file(uploaded_file):
+    """根据文件类型提取文字"""
+    text = ""
+    file_type = uploaded_file.name.split('.')[-1].lower()
+    
+    if file_type in ['txt', 'md']:
+        text = uploaded_file.read().decode("utf-8")
+        
+    elif file_type == 'docx' and docx:
+        doc = docx.Document(uploaded_file)
+        text = "\n".join([para.text for para in doc.paragraphs])
+        
+    elif file_type == 'pdf' and pypdf:
+        pdf_reader = pypdf.PdfReader(uploaded_file)
+        for page in pdf_reader.pages:
+            text += page.extract_text() + "\n"
+            
+    elif file_type in ['png', 'jpg', 'jpeg'] and Image and pytesseract:
+        image = Image.open(uploaded_file)
+        text = pytesseract.image_to_string(image, lang='chi_sim+eng') # 识别中文+英文
+        
+    else:
+        st.error(f"⚠️ 暂不支持解析 .{file_type} 格式，或缺少相关依赖库。请手动复制粘贴文本。")
+        
+    return text
+
 # --- 主界面逻辑 ---
 st.title("⚖️ 标准化工作智能助手")
 st.markdown("基于 Vibe Coding 构建的自动化工作流，集成会议纪要整理与草案意见比对功能。")
@@ -105,11 +151,26 @@ scene = st.selectbox("请选择工作场景", options=list(PROMPT_TEMPLATES.keys
 # 2. 动态展示输入框
 st.subheader("📝 原始材料输入")
 
+# 通用的文件上传区
+uploaded_file = st.file_uploader("📂 上传文件（支持 TXT, MD, DOCX, PDF, 图片）", type=["txt", "md", "docx", "pdf", "png", "jpg", "jpeg"])
+extracted_text = ""
+if uploaded_file is not None:
+    with st.spinner("正在解析文件内容..."):
+        extracted_text = extract_text_from_file(uploaded_file)
+    if extracted_text:
+        st.success("✅ 文件解析成功！")
+        st.text_area("📄 文件内容预览（可在此修改）", extracted_text, height=200)
+
+st.markdown("---")
+st.markdown("**或者，直接手动输入/粘贴内容：**")
+
 if scene == "国标草案研讨会会议纪要":
     meeting_name = st.text_input("会议名称")
     meeting_time = st.text_input("会议时间")
     attendees = st.text_area("参会人员及角色")
-    raw_record = st.text_area("原始记录（转写稿/速记/草稿）", height=300, placeholder="请粘贴会议录音转写文字或速记内容...")
+    
+    # 如果上传了文件，默认填入文件内容；否则留空让用户粘贴
+    raw_record = st.text_area("原始记录（转写稿/速记/草稿）", value=extracted_text, height=300, placeholder="请粘贴会议录音转写文字或速记内容...")
     feedback = st.text_area("多方反馈意见（可选）", height=150, placeholder="请粘贴批注或意见表内容...")
     
     input_content = f"会议名称：{meeting_name}\n时间：{meeting_time}\n参会人员：{attendees}\n\n原始记录：\n{raw_record}\n\n反馈意见：\n{feedback}"
@@ -118,7 +179,7 @@ elif scene == "草案批注意见提取与采纳情况比对":
     source_unit = st.text_input("来源单位/专家")
     original_text = st.text_area("原草案文本（相关段落）", height=150)
     modified_text = st.text_area("修改后草案文本（相关段落）", height=150)
-    screenshot_desc = st.text_area("批注截图内容描述（OCR识别结果或人工描述）", height=150, placeholder="例如：图片中在第3.1条旁边有批注‘这里表述不清，建议修改’...")
+    screenshot_desc = st.text_area("批注截图内容描述（OCR识别结果或人工描述）", value=extracted_text, height=150, placeholder="例如：图片中在第3.1条旁边有批注‘这里表述不清，建议修改’...")
     
     input_content = f"来源单位：{source_unit}\n原草案：\n{original_text}\n\n修改稿：\n{modified_text}\n\n截图描述：\n{screenshot_desc}"
 
@@ -131,30 +192,24 @@ if st.button("✨ 开始生成", type="primary"):
     else:
         with st.spinner("AI 正在思考并撰写文档..."):
             try:
-                # 初始化客户端
                 client = OpenAI(api_key=api_key, base_url=base_url)
-                
-                # 获取对应 Prompt
                 system_prompt = PROMPT_TEMPLATES[scene]
                 
-                # 调用大模型
                 response = client.chat.completions.create(
                     model=model_name,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": input_content}
                     ],
-                    temperature=0.1 # 低温度，确保严谨性
+                    temperature=0.1
                 )
                 
                 result = response.choices[0].message.content
                 
-                # 展示结果
                 st.success("生成完成！")
                 st.markdown("### 📄 生成结果预览")
                 st.markdown(result)
                 
-                # 下载按钮
                 st.download_button(
                     label="📥 下载为 Markdown 文件",
                     data=result,
@@ -165,6 +220,5 @@ if st.button("✨ 开始生成", type="primary"):
             except Exception as e:
                 st.error(f"调用出错：{e}")
 
-# --- 底部 ---
 st.markdown("---")
 st.caption("Vibe Coding 实践项目 | 标准化信息监控与处理中枢 v1.0")
